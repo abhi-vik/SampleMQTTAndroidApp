@@ -7,6 +7,8 @@ import android.widget.TextView
 import android.widget.ImageView
 import android.provider.Settings
 import android.content.Intent
+import android.app.AlertDialog
+import kotlin.concurrent.schedule
 import com.android.volley.RequestQueue
 import com.android.volley.toolbox.StringRequest
 import com.android.volley.toolbox.Volley
@@ -15,27 +17,24 @@ import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
 import com.google.gson.annotations.SerializedName
 import com.squareup.picasso.Picasso
+import java.util.Timer
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import org.eclipse.paho.android.service.MqttAndroidClient
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
 import org.eclipse.paho.client.mqttv3.MqttCallbackExtended
 import org.eclipse.paho.client.mqttv3.MqttMessage
+import java.lang.StringBuilder
 
 class MainActivity : AppCompatActivity() {
 
-    // I'm using lateinit for these widgets because I read that repeated calls to findViewById
-    // are energy intensive
     lateinit var retrieveButton: Button
     lateinit var temperature: TextView
     lateinit var imageView: ImageView
-    lateinit var switchButton: Button
-    lateinit var syncButton: Button
+    //    lateinit var switchButton: Button
     lateinit var publishButton: Button
     lateinit var textView: TextView
 
-    // I'm doing a late init here because I need this to be an instance variable but I don't
-    // have all the info I need to initialize it yet
     lateinit var mqttAndroidClient: MqttAndroidClient
 
     lateinit var queue: RequestQueue
@@ -43,12 +42,9 @@ class MainActivity : AppCompatActivity() {
     lateinit var mostRecentWeatherResult: WeatherResult
     lateinit var mostRecentWeatherForecast: WeatherForecastResult
 
-    // you may need to change this depending on where your MQTT broker is running
     val serverUri = "tcp://192.168.4.1:1883"
-    // you can use whatever name you want to here
     val clientId = "EmergingTechMQTTClient"
 
-    //these should "match" the topics on the "other side" (i.e, on the Raspberry Pi)
     val subscribeTopic = "steps"
     val publishTopic = "weather"
 
@@ -58,43 +54,39 @@ class MainActivity : AppCompatActivity() {
         retrieveButton = this.findViewById(R.id.retrieveButton)
         temperature = this.findViewById(R.id.temperature)
         imageView = this.findViewById(R.id.imageView)
-        switchButton = this.findViewById(R.id.switchButton)
-        syncButton = this.findViewById(R.id.syncButton)
+//        switchButton = this.findViewById(R.id.switchButton)
         publishButton = this.findViewById(R.id.publishButton)
         textView = this.findViewById(R.id.text)
 
-        mqttAndroidClient = MqttAndroidClient(getApplicationContext(), serverUri, clientId)
+        mqttAndroidClient = MqttAndroidClient(applicationContext, serverUri, clientId)
 
         queue = Volley.newRequestQueue(this)
         gson = Gson()
 
+
         retrieveButton.setOnClickListener({ getAllWeather() })
+//        switchButton.setOnClickListener({ switchNetworks() })
+        publishButton.visibility = Button.INVISIBLE
+        publishButton.setOnClickListener({ sendMessage() })
 
-        switchButton.setOnClickListener({ switchNetworks() })
-        syncButton.setOnClickListener({ syncWithPi() })
-        publishButton.setOnClickListener({ sendWeather() })
-
-        // when things happen in the mqtt client, these callbacks will be called
         mqttAndroidClient.setCallback(object : MqttCallbackExtended {
 
-            // when the client is successfully connected to the broker, this method gets called
             override fun connectComplete(reconnect: Boolean, serverURI: String?) {
                 println("Connection Complete!!")
-                // this subscribes the client to the subscribe topic
                 mqttAndroidClient.subscribe(subscribeTopic, 0)
+                sendWeather()
             }
 
-            // this method is called when a message is received that fulfills a subscription
             override fun messageArrived(topic: String?, message: MqttMessage?) {
-                println("received")
-                textView.text = (message.toString() + " steps")
+                println("Message Arrived")
+                println(message)
+                textView.text = message.toString()
             }
 
             override fun connectionLost(cause: Throwable?) {
                 println("Connection Lost")
             }
 
-            // this method is called when the client succcessfully publishes to the broker
             override fun deliveryComplete(token: IMqttDeliveryToken?) {
                 println("Delivery Complete")
             }
@@ -102,8 +94,16 @@ class MainActivity : AppCompatActivity() {
 
     }
 
+    private fun makeWeatherURL(type: String, count: Boolean = false): String {
+        var url = "https://api.openweathermap.org/data/2.5/$type?q=Austin&units=imperial&appid=03519fb228fd7abd9e4f94d06d81eb27"
+        if (count) {
+            url += "&cnt=16"
+        }
+        return url
+    }
+
     private fun getForecast() {
-        val url = "https://api.openweathermap.org/data/2.5/forecast?q=London&units=imperial&cnt=16&appid=03519fb228fd7abd9e4f94d06d81eb27"
+        val url = makeWeatherURL("forecast", true)
 
         val stringRequest = object : StringRequest(com.android.volley.Request.Method.GET, url,
                 com.android.volley.Response.Listener<String> { response ->
@@ -114,13 +114,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getWeather() {
-        val url = "https://api.openweathermap.org/data/2.5/weather?q=London&units=imperial&appid=03519fb228fd7abd9e4f94d06d81eb27"
+        val url = makeWeatherURL("weather")
 
         val stringRequest = object : StringRequest(com.android.volley.Request.Method.GET, url,
                 com.android.volley.Response.Listener<String> { response ->
                     mostRecentWeatherResult = gson.fromJson(response, WeatherResult::class.java)
                     val icon = mostRecentWeatherResult.weather.get(0).icon
-                    temperature.text = (mostRecentWeatherResult.main.temp.toString() + " F")
+                    temperature.text = (mostRecentWeatherResult.main.temp.toString() + " °F")
                     Picasso.get().load("https://openweathermap.org/img/wn/$icon@2x.png").into(imageView)
                 },
                 com.android.volley.Response.ErrorListener { println("******That didn't work!") }) {}
@@ -128,23 +128,44 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getAllWeather() {
+        val that = this
+
         getWeather()
         getForecast()
+        temperature.text = StringBuilder("Hold tight!").toString()
+        retrieveButton.visibility = Button.INVISIBLE
+
+        Timer("SettingUp", false).schedule(3000) {
+            that.runOnUiThread(Runnable() {
+                AlertDialog.Builder(that)
+                        .setTitle("Weather Received!")
+                        .setMessage("You will be redirected to the WiFi Settings page. Connect to \"IOT-MIS-21\". " +
+                                "Press the Back button to return here and then hit \"Check Goal Progress\".")
+                        .setPositiveButton("Understood", { _, _ ->
+                            startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
+                        })
+                        .create()
+                        .show()
+
+                publishButton.visibility = Button.VISIBLE
+            })
+        }
     }
 
-    // this method just connects the paho mqtt client to the broker
+    private fun sendMessage() {
+        if (mqttAndroidClient.isConnected) {
+            sendWeather()
+        } else {
+            syncWithPi()
+        }
+    }
+
     private fun syncWithPi() {
         println("+++++++ Connecting...")
         mqttAndroidClient.connect()
     }
 
-    // this method just connects the paho mqtt client to the broker
-    private fun switchNetworks() {
-        println("Attempt intent")
-        startActivity(Intent(Settings.ACTION_WIFI_SETTINGS))
-    }
-
-    private fun extractPreciptation(rain: Rain?): Double {
+    private fun extractPrecipitation(rain: Rain?): Double {
         var precipitation = 0.0
         if (rain?.onehour != null) {
             precipitation += rain.onehour.toDouble()
@@ -174,19 +195,15 @@ class MainActivity : AppCompatActivity() {
                     highestTemp = weatherResult.main.temp_max
                 }
 
-                totalPrecipitation += extractPreciptation(weatherResult.rain)
+                totalPrecipitation += extractPrecipitation(weatherResult.rain)
             }
         }
-
-        println(lowestTemp)
-        println(highestTemp)
-        println(totalPrecipitation)
 
         val map = """{
             "now": {
                 "temp_min": "${mostRecentWeatherResult.main.temp_min}",
                 "temp_max": "${mostRecentWeatherResult.main.temp_max}",
-                "rain": ${extractPreciptation(mostRecentWeatherResult.rain)}
+                "rain": ${extractPrecipitation(mostRecentWeatherResult.rain)}
             },
             "later": {
                 "temp_min": "$lowestTemp",
@@ -203,6 +220,7 @@ class MainActivity : AppCompatActivity() {
         message.payload = weatherMainString.toByteArray()
         println(message)
         mqttAndroidClient.publish(publishTopic, message)
+        textView.text = StringBuilder("Hold tight!").toString()
     }
 }
 
@@ -211,5 +229,4 @@ class Rain(@SerializedName("3h") val threehour: Double?, @SerializedName("1h") v
 class Coordinates(val lon: Double, val lat: Double)
 class Weather(val id: Int, val main: String, val description: String, val icon: String)
 class WeatherMain(val temp: Double, val pressure: Int, val humidity: Int, val temp_min: Double, val temp_max: Double)
-
 class WeatherForecastResult(val list: List<WeatherResult>)
